@@ -1,0 +1,3 @@
+[submodule "snarkjs-react"]
+	path = snarkjs-react
+	url = https://github.com/LHerskind/snarkjs-react.git
