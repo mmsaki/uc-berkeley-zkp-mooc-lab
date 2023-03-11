@@ -146,7 +146,24 @@ template CheckBitLength(b) {
     signal input in;
     signal output out;
 
-    // TODO
+    signal bits[b];
+
+    for (var i = 0; i < b; i++) {
+        bits[i] <== 1;
+    }
+
+    component bits2Num = Bits2Num(b);
+    bits2Num.bits <== bits;
+    signal sum_of_bits <== bits2Num.out;
+
+    for (var i = 0; i < b; i++) {
+        bits[i] * (1 - bits[i]) === 0;
+    }
+
+    component less_than = LessThan(252);
+    less_than.in[0] <== in;
+    less_than.in[1] <== sum_of_bits;
+    out <== less_than.out;
 }
 
 /*
@@ -195,6 +212,21 @@ template RightShift(shift) {
     signal output y;
 
     // TODO
+    var right = shift - 1;
+    if (right < 0) {
+        right = 0;
+    }
+
+    signal results[shift];
+    for (var i = 0; i < shift; i ++) {
+        results[i] <-- x >> (i + 1);
+    }
+
+    for (var i = 1; i < shift; i ++) {
+        (results[i - 1] - results[i] * 2) * (results[i - 1] - results[i] * 2 - 1) === 0;
+    }
+
+    y <== results[right];
 }
 
 /*
@@ -255,6 +287,30 @@ template LeftShift(shift_bound) {
     signal output y;
 
     // TODO
+    assert(shift < shift_bound || skip_checks);
+
+    signal exp[shift_bound];
+    for (var i = 0; i < shift_bound; i ++) {
+        exp[i] <== 2**(2**i); // 2**i corresponds to the value of the shift bits, 2**bit_value is x**b_i
+    }
+
+    var NUM_BITS = 25;
+
+    signal tmp[NUM_BITS];
+    signal results[NUM_BITS];
+
+    results[0] <== x;
+    component num2Bits = Num2Bits(NUM_BITS);
+    num2Bits.in <== shift;
+    signal shift_bits[NUM_BITS] <== num2Bits.bits;
+    for (var i = 0; i < NUM_BITS; i ++) {
+        tmp[i] <== shift_bits[i] * exp[i] + (1 - shift_bits[i]);
+        if (i < NUM_BITS - 1) {
+            results[i + 1] <== results[i] * tmp[i];
+        } else {
+            y <== results[i] * tmp[i];
+        }
+    }
 }
 
 /*
@@ -270,6 +326,26 @@ template MSNZB(b) {
     signal output one_hot[b];
 
     // TODO
+    assert((skip_checks == 0 && in != 0) || skip_checks == 1);
+
+    component n2b = Num2Bits(b + 1);
+    n2b.in <== in;
+    var one_bits[b];
+    for (var i = 0; i < b; i ++) {
+        one_bits[i] = n2b.bits[i];
+    }
+
+    // convert all low bits to 1, e.g., [1, 1, ..., 1, 0, 0]
+    for (var i = b - 2; i >= 0; i --) {
+        one_bits[i] = (1 - one_bits[i]) * one_bits[i + 1] + one_bits[i];
+    }
+
+    // convert one_bits into [0, 0, ..., 1, 0, 0], i.e., one_hot
+    one_hot[b - 1] <== one_bits[b - 1];
+    for (var i = b - 2; i >= 0; i --) {
+        one_hot[i] <-- (1 - one_bits[i + 1]) * one_bits[i];
+        (1 - one_hot[i]) * one_hot[i] === 0;
+    }
 }
 
 /*
@@ -288,6 +364,26 @@ template Normalize(k, p, P) {
     assert(P > p);
 
     // TODO
+    assert((e == 0 && m == 0) || (skip_checks == 0 && m != 0) || skip_checks);
+
+    component msnzb = MSNZB(P + 1);
+    msnzb.in <== m;
+    msnzb.skip_checks <== skip_checks;
+    signal one_hot[P + 1] <== msnzb.one_hot;
+    var ell = 0;
+    for (var i = 0; i < P + 1; i ++) {
+        ell += i * one_hot[i];
+    }
+    e_out <== e + ell - p;
+
+    signal shift <== P - ell;
+    component left_shift = LeftShift(252);
+    left_shift.x <== m;
+    left_shift.shift <== shift;
+    left_shift.skip_checks <== skip_checks;
+    m_out <== left_shift.y;
+
+    assert(skip_checks || (m_out >= 2**P && m_out < 2**(P+1)));
 }
 
 /*
@@ -304,4 +400,95 @@ template FloatAdd(k, p) {
     signal output m_out;
 
     // TODO
+    assert(e[0] != 0 || m[0] == 0);
+    assert(e[1] != 0 || m[1] == 0);
+
+    var P = 2*p + 1;
+
+    assert(m[0] == 0 || m[0] >= 2**p);
+    assert(m[1] == 0 || m[1] >= 2**p);
+
+    var shift_bound = 252;
+    var less_check_bound = 252;
+    var skip_checks = 0;
+
+    component check_left = CheckWellFormedness(k, p);
+    check_left.e <== e[0];
+    check_left.m <== m[0];
+    component check_right = CheckWellFormedness(k, p);
+    check_right.e <== e[1];
+    check_right.m <== m[1];
+
+    component left_shift_1 = LeftShift(shift_bound);
+    left_shift_1.x <== e[0];
+    left_shift_1.shift <== p + 1;
+    left_shift_1.skip_checks <== skip_checks;
+    signal mgn_0 <== left_shift_1.y + m[0];
+
+    component left_shift_2 = LeftShift(shift_bound);
+    left_shift_2.x <== e[1];
+    left_shift_2.shift <== p + 1;
+    left_shift_2.skip_checks <== skip_checks;
+    signal mgn_1 <== left_shift_2.y + m[1];
+
+    signal alpha_e;
+    signal alpha_m;
+    signal beta_e;
+    signal beta_m;
+
+    component less_than = LessThan(less_check_bound);
+    less_than.in[0] <== mgn_0;
+    less_than.in[1] <== mgn_1;
+    signal is_less <== less_than.out;
+
+    component switcher_e = Switcher();
+    switcher_e.sel <== is_less;
+    switcher_e.L <== e[0];
+    switcher_e.R <== e[1];
+    alpha_e <== switcher_e.outL;
+    beta_e <== switcher_e.outR;
+
+    component switcher_m = Switcher();
+    switcher_m.sel <== is_less;
+    switcher_m.L <== m[0];
+    switcher_m.R <== m[1];
+    alpha_m <== switcher_m.outL;
+    beta_m <== switcher_m.outR;
+
+    signal diff <== alpha_e - beta_e;
+    component is_diff_greater = LessThan(less_check_bound);
+    is_diff_greater.in[0] <== p + 1;
+    is_diff_greater.in[1] <== diff;
+
+    component is_alpha_e_zero = IsZero();
+    is_alpha_e_zero.in <== alpha_e;
+
+    signal should_skip <== is_diff_greater.out + is_alpha_e_zero.out;
+
+    component left_shift = LeftShift(shift_bound);
+    left_shift.x <== alpha_m * (1 - should_skip);
+    left_shift.shift <== diff;
+    left_shift.skip_checks <== should_skip;
+    
+    component normalize = Normalize(k, p, P);
+    normalize.e <== beta_e;
+    normalize.m <== (left_shift.y + beta_m);
+    normalize.skip_checks <== should_skip;
+
+    component round_and_check = RoundAndCheck(k, p, P);
+    round_and_check.e <== normalize.e_out * (1 - should_skip);
+    round_and_check.m <== normalize.m_out * (1 - should_skip);
+
+    component if_else_e = IfThenElse();
+    if_else_e.cond <== should_skip;
+    if_else_e.L <== alpha_e;
+    if_else_e.R <== round_and_check.e_out;
+
+    component if_else_m = IfThenElse();
+    if_else_m.cond <== should_skip;
+    if_else_m.L <== alpha_m;
+    if_else_m.R <== round_and_check.m_out;
+
+    e_out <== if_else_e.out;
+    m_out <== if_else_m.out;
 }
